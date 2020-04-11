@@ -224,42 +224,6 @@ class ModuleTest(absltest.TestCase):
     y = model(x, inner_model)
     self.assertEqual(y, jnp.array([3.]))
 
-  def test_capture_module_outputs(self):
-    x = jnp.array([1.])
-    _, initial_params = NestedModule.init(random.PRNGKey(0), x)
-    model = nn.Model(NestedModule, initial_params)
-    with nn.capture_module_outputs() as activations:
-      model(x)
-    expected_activations = {
-        '/': [x + 2],
-        '/dummy_0': [x + 1],
-        '/dummy_1': [x + 2],
-    }
-    self.assertEqual(activations.as_dict(), expected_activations)
-
-  def test_nested_model_capture_outputs(self):
-    x = jnp.array([1.])
-    _, inner_initial_params = DummyModule.init(random.PRNGKey(0), x)
-    inner_model = nn.Model(DummyModule, inner_initial_params)
-    _, initial_params = NestedModel.init(random.PRNGKey(1), x, inner_model)
-    model = nn.Model(NestedModel, initial_params)
-    with nn.capture_module_outputs() as activations:
-      model(x, inner_model)
-    expected_activations = {
-        '/': [x + 2],
-        '/dummy_0': [x + 1],
-        '/inner_model': [x + 2],
-    }
-    self.assertEqual(activations.as_dict(), expected_activations)
-
-  def test_truncated_module(self):
-    x = jnp.array([1.])
-    _, initial_params = NestedModule.init(random.PRNGKey(0), x)
-    model = nn.Model(NestedModule, initial_params)
-    model = model.truncate_at('/dummy_0')
-    y = model(x)
-    self.assertEqual(y, [x + 1])
-
   def test_call_module_method(self):
     class MultiMethod(nn.Module):
 

@@ -21,7 +21,7 @@ from .activation import (celu, elu, gelu, glu, leaky_relu, log_sigmoid,
                          softplus, swish, tanh)
 from .attention import (dot_product_attention, MultiHeadDotProductAttention,
                         SelfAttention)
-from .base import (Module, Model, Collection, capture_module_outputs,
+from .base import (Module, Model, Collection,
                    module, stateful, get_state, module_method)
 from .linear import Dense, DenseGeneral, Conv, ConvTranspose, Embed
 from .normalization import BatchNorm, LayerNorm, GroupNorm

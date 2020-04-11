@@ -34,15 +34,7 @@ from jax import random
 
 
 _module_stack = utils.CallStack()
-_module_output_trackers = utils.CallStack()
 _state_stack = utils.CallStack()
-
-
-def _track_outputs(x):
-  for module_output_tracker in _module_output_trackers:
-    xs = module_output_tracker.retrieve(default=[])
-    xs.append(x)
-    module_output_tracker.store(xs)
 
 
 class _ModuleFrame:
@@ -68,14 +60,13 @@ class _ModuleFrame:
   the parameters are only read from.
 
   Additional attributes on ModuleFrame track context needed to assist error
-  handling, shared parameters and transparent modules that are wrapped without
-  creating additional sub-parameters. TODO: Consider elaborating on this
-  last paragraph.
+  handling, shared parameters.
+
+  TODO: Consider elaborating on this last paragraph.
   """
 
   def __init__(self, name,
-               parent=None, params=None, rng=None,
-               transparent=False):
+               parent=None, params=None, rng=None):
     if params is None:
       params = {}
     self.parent = parent
@@ -84,8 +75,6 @@ class _ModuleFrame:
     self.shared = {}
     self.shared_names = set()
     self.name = name
-    self.transparent = transparent
-
     self._name_counter = 0
 
   @property
@@ -108,10 +97,9 @@ class _ModuleFrame:
         return '/' + self.name
 
     path = self.parent.path
-    if not self.parent.transparent:
-      if path[-1] != '/':
-        path += '/'
-      path += self.name
+    if path[-1] != '/':
+      path += '/'
+    path += self.name
     return path
 
   def is_descendent_of(self, frame):
@@ -192,7 +180,7 @@ def _fn_parameters(fn):
 
 
 MODULE_CLASSMETHODS = [
-    'create', 'create_by_shape', 'init', 'init_by_shape', 'call', 'partial'
+    'init', 'init_by_shape', 'call', 'partial'
 ]
 
 
@@ -271,11 +259,9 @@ class Module(metaclass=_ModuleMeta):
                          ' initialization.')
       params = parent.params[name]
       rng = None
-    frame = _ModuleFrame(name, parent=parent, rng=rng, params=params,
-                         transparent=cls._is_transparent())
+    frame = _ModuleFrame(name, parent=parent, rng=rng, params=params)
     with cls._with_instance(frame) as instance:
       y = instance.apply(*args, **apply_kwargs)
-      _track_outputs(y)
     return y
 
   @abc.abstractmethod
@@ -379,67 +365,6 @@ class Module(metaclass=_ModuleMeta):
     return PartialModule
 
   @classmethod
-  def create(cls, _rng, *args, name=None, **kwargs):
-    """Create a module instance by evaluating the model.
-
-    DEPRECATION WARNING:
-    `create()` is deprecated use `init()` to initialize parameters and
-    then explicitly create a `nn.Model` given the module and initialized
-    parameters.
-
-    Use create_by_shape instead to initialize without doing computation.
-    Initializer functions can depend both on the shape and the value of inputs.
-
-    Args:
-      _rng: the random number generator used to initialize parameters.
-      *args: arguments passed to the module's apply function
-      name: name of this module
-      **kwargs: keyword arguments passed to the module's apply function
-    Returns:
-      A pair consisting of the model output and an instance of Model
-    """
-    warnings.warn("`create()` will be removed soon."
-                  " Use `init()` to initialize parameters and then explicitly"
-                  " create a `nn.Model` given the module and initialized"
-                  " parameters.",
-                  DeprecationWarning)
-    y, params = cls.init(_rng, *args, name=name, **kwargs)
-    model = Model(cls, params)
-    return y, model
-
-  @classmethod
-  def create_by_shape(cls, _rng, input_specs, *args, name=None, **kwargs):
-    """Create a module instance using only shape and dtype information.
-
-    DEPRECATION WARNING:
-    `create_by_shape()` is deprecated use `init_by_shape()` to initialize
-    parameters and then explicitly create a `nn.Model` given the module and
-    initialized parameters.
-
-
-    This method will initialize the model without computation.
-    Initializer functions can depend on the shape but not the value of inputs.
-
-    Args:
-      _rng: the random number generator used to initialize parameters.
-      input_specs: an iterable of (shape, dtype) pairs specifying the inputs
-      *args: other arguments passed to the module's apply function
-      name: name of this module.
-      **kwargs: keyword arguments passed to the module's apply function
-    Returns:
-      A pair consisting of the model output and an instance of Model
-    """
-    warnings.warn("`create_by_shape()` will be removed soon."
-                  " Use `init_by_shape()` to initialize parameters and then"
-                  " explicitly create a `nn.Model` given the module and "
-                  " initialized parameters.",
-                  DeprecationWarning)
-
-    y, params = cls.init_by_shape(_rng, input_specs, *args, name=name, **kwargs)
-    model = Model(cls, params)
-    return y, model
-
-  @classmethod
   def init(cls, _rng, *args, name=None, **kwargs):
     """Initialize the module parameters.
 
@@ -459,11 +384,9 @@ class Module(metaclass=_ModuleMeta):
     if name is None:
       name = cls._default_name()
 
-    frame = _ModuleFrame(name, rng=_rng, parent=parent,
-                         transparent=cls._is_transparent())
+    frame = _ModuleFrame(name, rng=_rng, parent=parent)
     with cls._with_instance(frame) as instance:
       y = instance.apply(*args, **kwargs)
-      _track_outputs(y)
     return y, cls._post_process_params(frame.params)
 
   @classmethod
@@ -532,11 +455,9 @@ class Module(metaclass=_ModuleMeta):
       parent = None
     if name is None:
       name = cls._default_name()
-    frame = _ModuleFrame(name, params=params, parent=parent,
-                         transparent=cls._is_transparent())
+    frame = _ModuleFrame(name, params=params, parent=parent)
     with cls._with_instance(frame) as instance:
       y = instance.apply(*args, **kwargs)
-      _track_outputs(y)
     return y
 
   def param(self, name, shape, initializer):
@@ -676,10 +597,6 @@ class Module(metaclass=_ModuleMeta):
     return params
 
   @classmethod
-  def _is_transparent(cls):
-    return False
-
-  @classmethod
   def _is_shared(cls):
     return False
 
@@ -720,75 +637,6 @@ def module(fun):
     del self  # unused
     return fun(*args, **kwargs)
   return type(fun.__name__, (Module,), dict(apply=apply))
-
-
-# TODO(flax-dev) consider removing this...
-class TransparentModule(Module):
-  """Transparent module.
-
-  A transparent module can only have one parameter named '0'.
-  """
-
-  @classmethod
-  def _pre_process_params(cls, params):
-    return {'0': params}
-
-  @classmethod
-  def _post_process_params(cls, params):
-    entries = list(params.items())
-    if len(entries) != 1:
-      raise ValueError('Transparent modules should have exactly one child.')
-    key, value = entries[0]
-    if key != '0':
-      raise ValueError('Transparent module should contain an unnamed child.')
-    return value
-
-  @classmethod
-  def _is_transparent(cls):
-    return True
-
-
-class TruncatedModule(TransparentModule):
-  """Wraps a Module and returns the requested intermediate outputs instead.
-
-  See `Model.truncate_at` for a simple api to get the intermediate outputs of
-  an existing Model.
-  """
-
-  def apply(self, *args, wrapped_module=None, truncate_path=None, **kwargs):
-    """Apply the wrapped module and return some of its intermediate outputs.
-
-    Args:
-      *args: the positional arguments for the wrapped module.
-      wrapped_module: The module class to be wrapped.
-      truncate_path: the full name of the module (eg. '/module/sub_module').
-        A list or dict of module paths can be provided to obtain the
-        intermediate outputs of multiple modules.
-      **kwargs: the keyword arguments for the wrapped module.
-    Returns:
-      The intermediate outputs specified by truncate_path.
-    """
-    if wrapped_module is None or truncate_path is None:
-      raise ValueError(
-          '`wrapped_module` and `truncate_path` are required keyword arguments')
-    with capture_module_outputs() as module_outputs:
-      wrapped_module(*args, **kwargs, name='0')
-
-    def lookup_output(path):
-      return module_outputs[path]
-    return jax.tree_map(lookup_output, truncate_path)
-
-
-@contextlib.contextmanager
-def capture_module_outputs():
-  """A context manager that captures all model outputs.
-
-  Yields:
-    A `flax.nn.Collection` containing all module outputs.
-  """
-  with Collection().mutate() as module_outputs:
-    with _module_output_trackers.frame(module_outputs):
-      yield module_outputs
 
 
 class ModuleState():
@@ -905,22 +753,6 @@ class Model:
 
   def __call__(self, *args, **kwargs):
     return self.module.call(self.params, *args, **kwargs)
-
-  def truncate_at(self, module_path):
-    """Truncate the model by returning the outputs of the given sub-module.
-
-    Args:
-      module_path: the full name of the module (eg. '/module/sub_module').
-        A list or dict of module paths can be provided to obtain the
-        intermediate outputs of multiple modules.
-    Returns:
-      A new model with the truncated outputs. If module_path is a pytree of
-      paths the outputs will be have the same structure where each path is
-      replaced by the corresponding intermediate output.
-    """
-    truncated_module_cls = TruncatedModule.partial(
-        wrapped_module=self.module, truncate_path=module_path)
-    return self.replace(module=truncated_module_cls)
 
   def __getattr__(self, name):
     value = getattr(self.module, name)
