@@ -213,7 +213,7 @@ class _ModuleMeta(abc.ABCMeta):
 
     def wrap_special_method(name):
       """override the signature and docstring for one of Module's classmethods."""
-      orig_fn = getattr(Module, name)
+      orig_fn = getattr(cls, name)
 
       @functools.wraps(orig_fn)
       def wrapper(class_, *args, **kwargs):
