@@ -114,64 +114,6 @@ class _ModuleFrame:
     return name
 
 
-def module_method(fn):
-  """Decorates a function as a module method.
-
-  The `module_method` allows modules to have multiple methods that make use of
-  the modules parameters.
-
-  Example::
-
-    class MyLinearModule(nn.Module):
-      def apply(self, x, features, kernel_init):
-        kernel = self.param('kernel', (x.shape[-1], features), kernel_init)
-        return jnp.dot(x, kernel)
-
-      @nn.module_method
-      def apply_transpose(self, x, **kwargs):
-        kernel = self.get_param('kernel')
-        return jnp.dot(x, kernel.transpose((1, 0)))
-
-  A module method can be called on A Model instance directly::
-
-    y, initial_params = MyLinearModule.init(rng, x)
-    model = nn.Model(MyLinearModule, initial_params)
-    z = model.apply_transpose(y)
-
-  Module methods can also be called on shared modules::
-
-    class AutoEncoder(nn.module):
-      def apply(self, x, features):
-        linear_fn = MyLinearModule.shared(features=features)
-        h = linear_fn(x)
-        y = linear_fn.apply_transpose(h)
-        return y
-
-
-  Args:
-    fn: the function to be decorated
-  Returns:
-    the decorated function
-  """
-
-  cache = {}
-
-  # module method are just Module class instances.
-  # But we want it to inherit from the class such that we can call other methods
-  # of the module. We need a class property to find out which class the method
-  # is defined on.
-  def wrapper(cls):
-    if cls not in cache:
-      class ModuleMethod(cls):
-        apply = fn
-      ModuleMethod.__name__ = fn.__name__
-      ModuleMethod.__qualname__ = f'{cls.__qualname__}.{fn.__name__}'
-      cache[cls] = ModuleMethod
-    return cache[cls]
-
-  return utils.classproperty(wrapper)
-
-
 def _fold_in_str(rng, data):
   """Fold a string into a jax.random.PRNGKey using its SHA-1 hash."""
   m = hashlib.sha1()
@@ -184,33 +126,6 @@ def _fold_in_str(rng, data):
 class Module:
   """Functional modules."""
 
-  # def __new__(cls, *args, name=None, **kwargs):
-  #   parent = _module_stack[-1]
-  #   apply_kwargs = kwargs
-
-  #   if name is None:  # also no default name
-  #     name = cls.__name__ + '_' + parent.create_name()
-  #   cls._check_name(name, parent)
-
-  #   if parent.is_init and name not in parent.params:
-  #     rng = _fold_in_str(parent.rng, name)
-  #     params = {}
-  #     parent.params[name] = params
-  #   else:  # apply
-  #     if name not in parent.params:
-  #       raise ValueError(f'No module named {name} was created during'
-  #                        ' initialization.')
-  #     params = parent.params[name]
-  #     rng = None
-
-  #   frame = _ModuleFrame(name, parent=parent, rng=rng, params=params)
-
-  #   instance = object.__new__(cls)
-  #   instance._frame = frame  # pylint: disable=protected-access
-  #   instance._apply_kwargs = apply_kwargs
-  #   #with _module_stack.frame(frame):
-  #   #  yield instance
-  #   return instance
   def __new__(cls, *args, **kwargs):
     # record point in module stack that object was instantiated
     # needed for passing shared submodules around as arguments
@@ -225,38 +140,24 @@ class Module:
     if not _module_stack:
       raise ValueError('A Module should only be instantiated directly inside'
                        ' another module.')
-    # ----
     # needed for top-level multi-method module-instance attr inits
     if not self._parent:
       self._parent = _module_stack[-1]
-    parent = self._parent
-    # parent = _module_stack[-1]
-    self._parent2 = _module_stack[-1]
-    #apply_kwargs = kwargs
     if not hasattr(self, 'name') or self.name is None:
-      self.name = type(self).__name__ + '_' + parent.create_name()
-    name = self.name
-    self._check_name(name, parent)
-    if parent.is_init and name not in parent.params:
-      rng = _fold_in_str(parent.rng, name)
+      self.name = type(self).__name__ + '_' + self._parent.create_name()
+    self._check_name(self.name, self._parent)
+    if self._parent.is_init and self.name not in self._parent.params:
+      rng = _fold_in_str(self._parent.rng, self.name)
       params = {}
-      parent.params[name] = params
+      self._parent.params[self.name] = params
     else:  # apply
-      if name not in parent.params:
-        raise ValueError(f'No module named {name} was created during'
+      if self.name not in self._parent.params:
+        raise ValueError(f'No module named {self.name} was created during'
                          ' initialization.')
-      params = parent.params[name]
+      params = self._parent.params[self.name]
       rng = None
-    frame = _ModuleFrame(name, parent=parent, rng=rng, params=params)
-    #instance = object.__new__(cls)
-    #instance._frame = frame  # pylint: disable=protected-access
-    #instance._apply_kwargs = apply_kwargs
-    #self._frame = frame
-    # ----
-    #apply_kwargs = self._apply_kwargs.copy()
-    #apply_kwargs.update(kwargs)
-    #with _module_stack.frame(self._frame):
-    with self._with_instance(frame) as instance:
+    frame = _ModuleFrame(self.name, parent=self._parent, rng=rng, params=params)
+    with self._with_instance(frame):
       y = self.apply(*args, **kwargs)
     return y
 
@@ -275,13 +176,10 @@ class Module:
     Returns:
       A pair consisting of the model output and the initialized parameters
     """
-    kwargs = self._extend_kwargs(kwargs)
     if _module_stack:
       parent = _module_stack[-1]
     else:
       parent = None
-    if name is None:
-      name = self._default_name()
 
     frame = _ModuleFrame(name, rng=_rng, parent=parent)
     with self._with_instance(frame) as instance:
@@ -344,13 +242,11 @@ class Module:
     Returns:
       The output of the module's apply function.
     """
-    kwargs = self._extend_kwargs(kwargs)
     if _module_stack:
       parent = _module_stack[-1]
     else:
       parent = None
-    if name is None:
-      name = self._default_name()
+
     frame = _ModuleFrame(name, params=params, parent=parent)
     with self._with_instance(frame) as instance:
      y = instance.apply(*args, **kwargs)
@@ -444,7 +340,7 @@ class Module:
     return self._frame.is_init
 
   @contextlib.contextmanager
-  def _with_instance(self, frame):
+  def _with_instance(self, frame):  # TODO: rename this
     """Private constructor for Module.
 
     A module instance is constructed using a scope and is tied to a _ModuleFrame
@@ -470,14 +366,6 @@ class Module:
         raise ValueError('Name should not contain slashes or colons.')
       if name in parent.params:
         raise ValueError(f'A module with named "{name}" already exists.')
-
-  @classmethod
-  def _extend_kwargs(cls, kwargs):
-    return kwargs
-
-  @classmethod
-  def _default_name(cls):
-    return None
 
 
 def module(fun):
