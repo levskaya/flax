@@ -418,7 +418,7 @@ class MultiHeadDotProductAttention(base.Module):
 
 # TODO(flax-dev): Consider refactoring MultiHeadDotProductAttention and moving
 # causal_mask and cache support into this class instead.
-SelfAttention = MultiHeadDotProductAttention.partial(inputs_kv=None)
+#SelfAttention = MultiHeadDotProductAttention.partial(inputs_kv=None)
 
 
 def make_padding_mask(padding_mask_query,

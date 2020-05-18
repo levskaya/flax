@@ -19,8 +19,8 @@
 from .activation import (celu, elu, gelu, glu, leaky_relu, log_sigmoid,
                          log_softmax, relu, sigmoid, soft_sign, softmax,
                          softplus, swish, tanh)
-from .attention import (dot_product_attention, MultiHeadDotProductAttention,
-                        SelfAttention)
+from .attention import (dot_product_attention, MultiHeadDotProductAttention,)
+                        #SelfAttention)
 from .base import (Module, Model, Collection,
                    module, stateful, get_state, module_method)
 from .linear import Dense, DenseGeneral, Conv, ConvTranspose, Embed

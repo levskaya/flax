@@ -71,8 +71,8 @@ class _ModuleFrame:
     self.parent = parent
     self.rng = rng
     self.params = params
-    self.shared = {}
-    self.shared_names = set()
+    #self.shared = {}
+    #self.shared_names = set()
     self.name = name
     self._name_counter = 0
 
@@ -187,18 +187,20 @@ class Module:
   """Functional modules."""
 
   def __new__(cls, *args, name=None, **kwargs):
-    if not _module_stack:
-      raise ValueError('A Module should only be instantiated directly inside'
-                       ' another module.')
-    parent = cls._get_construction_frame()
-    apply_kwargs = cls._extend_kwargs(kwargs)
-    if name is None:
-      name = cls._default_name()
-    elif cls._is_shared():
-      raise ValueError('Cannot override the name of a shared module')
+    # if not _module_stack:
+    #   raise ValueError('A Module should only be instantiated directly inside'
+    #                    ' another module.')
+
+    parent = _module_stack[-1]
+    apply_kwargs = kwargs
+    #parent = cls._get_construction_frame()
+    #apply_kwargs = cls._extend_kwargs(kwargs)
+
     if name is None:  # also no default name
       name = cls.__name__ + '_' + parent.create_name()
     cls._check_name(name, parent)
+    #parent.shared_names.add(name)
+
     if parent.is_init and name not in parent.params:
       rng = _fold_in_str(parent.rng, name)
       params = {}
@@ -211,113 +213,130 @@ class Module:
       rng = None
 
     frame = _ModuleFrame(name, parent=parent, rng=rng, params=params)
-    with cls._with_instance(frame) as instance:
-      y = instance.apply(*args, **apply_kwargs)
 
+    # with cls._with_instance(frame) as instance:
+    #   y = instance.apply(*args, **apply_kwargs)
+    # return y
+    instance = object.__new__(cls)
+    instance._frame = frame  # pylint: disable=protected-access
+    instance._apply_kwargs = apply_kwargs
+    #with _module_stack.frame(frame):
+    #  yield instance
+    return instance
+
+  def __call__(self, *args, **kwargs):
+    if not _module_stack:
+      raise ValueError('A Module should only be instantiated directly inside'
+                       ' another module.')
+    apply_kwargs = self._apply_kwargs.copy()
+    apply_kwargs.update(kwargs)
+    with _module_stack.frame(self._frame):
+    #with self._with_instance(frame) as instance:
+      y = self.apply(*args, **apply_kwargs)
     return y
 
   @abc.abstractmethod
   def apply(self, *args, **kwargs):
     pass
 
-  @classmethod
-  def shared(class_, *, name=None, **kwargs):
-    """Partially applies a module and shared parameters for each call.
+  # @classmethod
+  # def shared(class_, *, name=None, **kwargs):
+  #   """Partially applies a module and shared parameters for each call.
 
-    Args:
-      name: name of this module.
-      **kwargs: keyword arguments that should be partially applied.
-    Returns:
-      A subclass of Module that shares parameters when called multiple times.
-    """
-    if not _module_stack:
-      raise ValueError(
-          'The shared module should be used during Module application')
+  #   Args:
+  #     name: name of this module.
+  #     **kwargs: keyword arguments that should be partially applied.
+  #   Returns:
+  #     A subclass of Module that shares parameters when called multiple times.
+  #   """
+  #   if not _module_stack:
+  #     raise ValueError(
+  #         'The shared module should be used during Module application')
 
-    parent = _module_stack[-1]
-    if name is None:
-      name = parent.create_name()
-    if name in parent.shared_names:
-      raise ValueError(f'Shared module named "{name}" already exists.')
-    parent.shared_names.add(name)
+  #   parent = _module_stack[-1]
+  #   if name is None:
+  #     name = parent.create_name()
+  #   if name in parent.shared_names:
+  #     raise ValueError(f'Shared module named "{name}" already exists.')
+  #   parent.shared_names.add(name)
 
-    partial_module = class_.partial(**kwargs)
+  #   partial_module = class_.partial(**kwargs)
 
-    class SharedModule(partial_module):
-      """Wraps a module to enable shared parameters."""
+  #   class SharedModule(partial_module):
+  #     """Wraps a module to enable shared parameters."""
 
-      @classmethod
-      def _default_name(cls):
-        return name
+  #     @classmethod
+  #     def _default_name(cls):
+  #       return name
 
-      @classmethod
-      def _is_shared(cls):
-        return True
+  #     @classmethod
+  #     def _is_shared(cls):
+  #       return True
 
-      @classmethod
-      def _get_construction_frame(cls):
-        return parent
+  #     @classmethod
+  #     def _get_construction_frame(cls):
+  #       return parent
 
-    SharedModule.__name__ = class_.__name__
-    SharedModule.__qualname__ = class_.__qualname__
+  #   SharedModule.__name__ = class_.__name__
+  #   SharedModule.__qualname__ = class_.__qualname__
 
-    return SharedModule
+  #   return SharedModule
 
-  @classmethod
-  def _get_construction_frame(cls):
-    """Return the ModuleFrame where this module was constructed.
+  # @classmethod
+  # def _get_construction_frame(cls):
+  #   """Return the ModuleFrame where this module was constructed.
 
-    Modules can be shared across different parts of a parameter tree.
-    We need to ensure that the parameter object is the same in every instance
-    of the same shared module. We resolve this by deciding on a canonical
-    ModuleFrame (corresponding to a particular part of the top-level parameter
-    tree) where parameters are stored. Concretely, it is the
-    "construction frame" -- that is, the frame in which the module is first
-    defined. For non-shared modules, that's where it's called. For shared
-    modules, it's where `submodule.shared(...)` is called (which may or may
-    not be the frame in which it is used.)
+  #   Modules can be shared across different parts of a parameter tree.
+  #   We need to ensure that the parameter object is the same in every instance
+  #   of the same shared module. We resolve this by deciding on a canonical
+  #   ModuleFrame (corresponding to a particular part of the top-level parameter
+  #   tree) where parameters are stored. Concretely, it is the
+  #   "construction frame" -- that is, the frame in which the module is first
+  #   defined. For non-shared modules, that's where it's called. For shared
+  #   modules, it's where `submodule.shared(...)` is called (which may or may
+  #   not be the frame in which it is used.)
 
-    Returns:
-      The ModuleFrame instance where this module was constructed.
-    """
-    return _module_stack[-1]
+  #   Returns:
+  #     The ModuleFrame instance where this module was constructed.
+  #   """
+  #   return _module_stack[-1]
 
-  @classmethod
-  def partial(class_, *, name=None, **kwargs):
-    """Partially applies a module with the given arguments.
+  # @classmethod
+  # def partial(class_, *, name=None, **kwargs):
+  #   """Partially applies a module with the given arguments.
 
-    Unlike `functools.partial` this will return a subclass of Module.
+  #   Unlike `functools.partial` this will return a subclass of Module.
 
-    Args:
-      name: the name used the module
-      **kwargs: the argument to be applied.
-    Returns:
-      A subclass of Module which partially applies the given keyword arguments.
-    """
+  #   Args:
+  #     name: the name used the module
+  #     **kwargs: the argument to be applied.
+  #   Returns:
+  #     A subclass of Module which partially applies the given keyword arguments.
+  #   """
 
-    class PartialModule(class_):
-      """Wraps a module with partial application."""
+  #   class PartialModule(class_):
+  #     """Wraps a module with partial application."""
 
-      @classmethod
-      def _default_name(cls):
-        if name is not None:
-          return name
-        else:
-          return super()._default_name()
+  #     @classmethod
+  #     def _default_name(cls):
+  #       if name is not None:
+  #         return name
+  #       else:
+  #         return super()._default_name()
 
-      @classmethod
-      def _extend_kwargs(cls, invoke_kwargs):
-        extended_kwargs = kwargs.copy()
-        extended_kwargs.update(invoke_kwargs)
-        return super()._extend_kwargs(extended_kwargs)
-    # __doc__ is handled by the Module meta class
-    PartialModule.__name__ = class_.__name__
-    PartialModule.__qualname__ = class_.__qualname__
+  #     @classmethod
+  #     def _extend_kwargs(cls, invoke_kwargs):
+  #       extended_kwargs = kwargs.copy()
+  #       extended_kwargs.update(invoke_kwargs)
+  #       return super()._extend_kwargs(extended_kwargs)
+  #   # __doc__ is handled by the Module meta class
+  #   PartialModule.__name__ = class_.__name__
+  #   PartialModule.__qualname__ = class_.__qualname__
 
-    return PartialModule
+  #   return PartialModule
 
-  @classmethod
-  def init(cls, _rng, *args, name=None, **kwargs):
+  #@classmethod
+  def init(self, _rng, *args, name=None, **kwargs):
     """Initialize the module parameters.
 
     Args:
@@ -328,21 +347,21 @@ class Module:
     Returns:
       A pair consisting of the model output and the initialized parameters
     """
-    kwargs = cls._extend_kwargs(kwargs)
+    kwargs = self._extend_kwargs(kwargs)
     if _module_stack:
       parent = _module_stack[-1]
     else:
       parent = None
     if name is None:
-      name = cls._default_name()
+      name = self._default_name()
 
     frame = _ModuleFrame(name, rng=_rng, parent=parent)
-    with cls._with_instance(frame) as instance:
+    with self._with_instance(frame) as instance:
       y = instance.apply(*args, **kwargs)
-    return y, cls._post_process_params(frame.params)
+    return y, frame.params
 
-  @classmethod
-  def init_by_shape(cls, _rng, input_specs, *args, name=None, **kwargs):
+  #@classmethod
+  def init_by_shape(self, _rng, input_specs, *args, name=None, **kwargs):
     """Initialize the module parameters.
 
     This method will initialize the module parameters without computation.
@@ -375,7 +394,7 @@ class Module:
 
     def lazy_init(*inputs):
       def init_fn():
-        return cls.init(_rng, *(inputs + args), name=name, **kwargs)
+        return self.init(_rng, *(inputs + args), name=name, **kwargs)
       if stochastic_rng is not None:
         # Create a new stochastic scope inside the lazy evalution
         # this way we can use a stochastic scope in combination
@@ -386,8 +405,8 @@ class Module:
         return init_fn()
     return jax_utils.partial_eval_by_shape(lazy_init, input_specs)
 
-  @classmethod
-  def call(cls, params, *args, name=None, **kwargs):
+  #@classmethod
+  def call(self, params, *args, name=None, **kwargs):
     """Evaluate the module with the given parameters.
 
     Args:
@@ -399,17 +418,16 @@ class Module:
     Returns:
       The output of the module's apply function.
     """
-    params = cls._pre_process_params(params)
-    kwargs = cls._extend_kwargs(kwargs)
+    kwargs = self._extend_kwargs(kwargs)
     if _module_stack:
       parent = _module_stack[-1]
     else:
       parent = None
     if name is None:
-      name = cls._default_name()
+      name = self._default_name()
     frame = _ModuleFrame(name, params=params, parent=parent)
-    with cls._with_instance(frame) as instance:
-      y = instance.apply(*args, **kwargs)
+    with self._with_instance(frame) as instance:
+     y = instance.apply(*args, **kwargs)
     return y
 
   def param(self, name, shape, initializer):
@@ -499,9 +517,9 @@ class Module:
     _top_frame('is_initializing')
     return self._frame.is_init
 
-  @classmethod
+  #@classmethod
   @contextlib.contextmanager
-  def _with_instance(cls, frame):
+  def _with_instance(self, frame):
     """Private constructor for Module.
 
     A module instance is constructed using a scope and is tied to a _ModuleFrame
@@ -513,10 +531,12 @@ class Module:
     Yields:
       An instance of Module
     """
-    instance = object.__new__(cls)
-    instance._frame = frame  # pylint: disable=protected-access
+    #instance = object.__new__(cls)
+    #instance._frame = frame  # pylint: disable=protected-access
+    self._frame = frame
     with _module_stack.frame(frame):
-      yield instance
+      #yield instance
+      yield self
 
   @classmethod
   def _check_name(cls, name, parent):
@@ -526,31 +546,26 @@ class Module:
         raise ValueError('Name must be a string.')
       if '/' in name or ':' in name:
         raise ValueError('Name should not contain slashes or colons.')
-    shared = cls._is_shared()
-    if name in parent.shared:
-      # a module with this name already exists. Check validity of sharing
-      if shared != parent.shared[name]:
-        raise ValueError(f'The name "{name}" is used for both a shared'
-                         ' and unshared module.')
-      if not parent.shared[name]:
+      if name in parent.params:
         raise ValueError(f'A module with named "{name}" already exists.')
-    parent.shared[name] = shared
+    # shared = cls._is_shared()
+    # if name in parent.shared:
+    #   # a module with this name already exists. Check validity of sharing
+    #   if shared != parent.shared[name]:
+    #     raise ValueError(f'The name "{name}" is used for both a shared'
+    #                      ' and unshared module.')
+    #   if not parent.shared[name]:
+    #     raise ValueError(f'A module with named "{name}" already exists.')
+    # parent.shared[name] = shared
 
   @classmethod
   def _extend_kwargs(cls, kwargs):
     return kwargs
 
-  @classmethod
-  def _pre_process_params(cls, params):
-    return params
-
-  @classmethod
-  def _post_process_params(cls, params):
-    return params
-
-  @classmethod
-  def _is_shared(cls):
-    return False
+  # @classmethod
+  # def _is_shared(cls):
+  #   # return False
+  #   return True
 
   @classmethod
   def _default_name(cls):
