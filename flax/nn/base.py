@@ -21,7 +21,6 @@ import functools
 import hashlib
 import inspect
 from typing import Any
-import warnings
 
 from . import utils
 from . import stochastic
@@ -175,55 +174,6 @@ def module_method(fn):
   return utils.classproperty(wrapper)
 
 
-def _fn_parameters(fn):
-  return tuple(inspect.signature(fn).parameters.values())
-
-
-MODULE_CLASSMETHODS = [
-    'init', 'init_by_shape', 'call', 'partial'
-]
-
-
-class _ModuleMeta(abc.ABCMeta):
-  """Meta class for automatically setting the doc of Modules."""
-
-  def __init__(cls, name, bases, attrs):
-    super(_ModuleMeta, cls).__init__(name, bases, attrs)
-    apply_fn = cls.apply
-    apply_doc = apply_fn.__doc__
-    cls.__doc__ = apply_doc
-    apply_params = _fn_parameters(apply_fn)
-    cls.__signature__ = inspect.signature(cls).replace(
-        parameters=apply_params[1:])
-
-    if not bases:
-      return  # skip method signature overides for Module class.
-
-    def wrap_special_method(name):
-      """override the signature and docstring for one of Module's classmethods."""
-      orig_fn = getattr(Module, name)
-
-      @functools.wraps(orig_fn)
-      def wrapper(class_, *args, **kwargs):
-        super_fn = getattr(super(cls, class_), name)
-        return super_fn(*args, **kwargs)
-      wrapper.__doc__ = f'''{orig_fn.__doc__}
-
-      Apply docstring:
-
-      {apply_doc}
-      '''
-      base_params = tuple(x for x in _fn_parameters(orig_fn)
-                          if x.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD)
-      new_params = base_params + apply_params[1:]
-      wrapper.__signature__ = inspect.signature(orig_fn).replace(
-          parameters=new_params)
-      setattr(cls, name, classmethod(wrapper))
-
-    for name in MODULE_CLASSMETHODS:
-      wrap_special_method(name)
-
-
 def _fold_in_str(rng, data):
   """Fold a string into a jax.random.PRNGKey using its SHA-1 hash."""
   m = hashlib.sha1()
@@ -233,7 +183,7 @@ def _fold_in_str(rng, data):
   return random.fold_in(rng, hash_int)
 
 
-class Module(metaclass=_ModuleMeta):
+class Module:
   """Functional modules."""
 
   def __new__(cls, *args, name=None, **kwargs):
@@ -259,9 +209,11 @@ class Module(metaclass=_ModuleMeta):
                          ' initialization.')
       params = parent.params[name]
       rng = None
+
     frame = _ModuleFrame(name, parent=parent, rng=rng, params=params)
     with cls._with_instance(frame) as instance:
       y = instance.apply(*args, **apply_kwargs)
+
     return y
 
   @abc.abstractmethod
