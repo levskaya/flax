@@ -143,9 +143,11 @@ class Module:
     # needed for top-level multi-method module-instance attr inits
     if not self._parent:
       self._parent = _module_stack[-1]
+
     if not hasattr(self, 'name') or self.name is None:
       self.name = type(self).__name__ + '_' + self._parent.create_name()
     self._check_name(self.name, self._parent)
+
     if self._parent.is_init and self.name not in self._parent.params:
       rng = _fold_in_str(self._parent.rng, self.name)
       params = {}
@@ -157,6 +159,7 @@ class Module:
       params = self._parent.params[self.name]
       rng = None
     frame = _ModuleFrame(self.name, parent=self._parent, rng=rng, params=params)
+
     with self._with_instance(frame):
       y = self.apply(*args, **kwargs)
     return y

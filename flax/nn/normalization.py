@@ -14,6 +14,10 @@
 
 """Normalization modules for Flax."""
 
+from collections.abc import Iterable  # pylint: disable=g-importing-member
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence, Any
+
 from . import base
 
 from jax import lax
@@ -122,20 +126,21 @@ class BatchNorm(base.Module):
     return jnp.asarray(y, dtype)
 
 
+@dataclass
 class LayerNorm(base.Module):
   """Layer normalization (https://arxiv.org/abs/1607.06450).
 
   Operates on the last axis of the input data.
   """
+  epsilon: float = 1e-6
+  dtype: Any = jnp.float32
+  bias: bool = True
+  scale: bool = True
+  bias_init: Callable = initializers.zeros
+  scale_init: Callable = initializers.ones
+  name: Optional[str] = None
 
-  def apply(self,
-            x,
-            epsilon=1e-6,
-            dtype=jnp.float32,
-            bias=True,
-            scale=True,
-            bias_init=initializers.zeros,
-            scale_init=initializers.ones):
+  def apply(self, x):
     """Applies layer normalization on the input.
 
     It normalizes the activations of the layer for each given example in a
@@ -156,19 +161,18 @@ class LayerNorm(base.Module):
 
     Returns:
       Normalized inputs (the same shape as inputs).
-
     """
     features = x.shape[-1]
     mean = jnp.mean(x, axis=-1, keepdims=True)
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
     var = mean2 - lax.square(mean)
-    mul = lax.rsqrt(var + epsilon)
-    if scale:
-      mul = mul * jnp.asarray(self.param('scale', (features,), scale_init),
-                              dtype)
+    mul = lax.rsqrt(var + self.epsilon)
+    if self.scale:
+      mul = mul * jnp.asarray(self.param('scale', (features,), self.scale_init),
+                              self.dtype)
     y = (x - mean) * mul
-    if bias:
-      y = y + jnp.asarray(self.param('bias', (features,), bias_init), dtype)
+    if self.bias:
+      y = y + jnp.asarray(self.param('bias', (features,), self.bias_init), self.dtype)
     return y
 
 

@@ -16,6 +16,8 @@
 """Attention core modules for Flax."""
 
 from collections.abc import Iterable  # pylint: disable=g-importing-member
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence, Any
 
 import warnings
 
@@ -196,32 +198,34 @@ jax.tree_util.register_pytree_node(
     Cache, base.iterate_collection, base.collection_from_iterable)
 
 
+@dataclass
 class MultiHeadDotProductAttention(base.Module):
   """Multi-head dot-product attention."""
+  num_heads: int
+  dtype: Any = jnp.float32
+  qkv_features: Optional[int] = None
+  out_features: Optional[int] = None
+  attention_axis: Optional[int] = None
+  causal_mask: bool = False
+  broadcast_dropout: bool = True
+  dropout_rate: float = 0.
+  deterministic: bool = False
+  precision: Any = None
+  kernel_init: Callable = default_kernel_init
+  bias_init: Callable = initializers.zeros
+  bias: bool = True
+  cache: Any = None
+  attention_fn: Callable = dot_product_attention
+  name: Optional[str] = None
 
   def apply(self,
             inputs_q,
             inputs_kv,
-            num_heads,
-            dtype=jnp.float32,
-            qkv_features=None,
-            out_features=None,
-            attention_axis=None,
-            causal_mask=False,
             padding_mask=None,
             key_padding_mask=None,
             segmentation=None,
             key_segmentation=None,
-            cache=None,
-            broadcast_dropout=True,
-            dropout_rng=None,
-            dropout_rate=0.,
-            deterministic=False,
-            precision=None,
-            kernel_init=default_kernel_init,
-            bias_init=initializers.zeros,
-            bias=True,
-            attention_fn=dot_product_attention):
+            dropout_rng=None):
     """Applies multi-head dot product attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
@@ -269,43 +273,43 @@ class MultiHeadDotProductAttention(base.Module):
       output of shape `[bs, dim1, dim2, ..., dimN, features]`.
     """
 
-    assert causal_mask or not cache, (
+    assert self.causal_mask or not self.cache, (
         'Caching is only support for causal attention.')
 
     if inputs_kv is None:
       inputs_kv = inputs_q
 
-    if attention_axis is None:
-      attention_axis = tuple(range(1, inputs_q.ndim - 1))
+    if self.attention_axis is None:
+      self.attention_axis = tuple(range(1, inputs_q.ndim - 1))
 
-    features = out_features or inputs_q.shape[-1]
-    qkv_features = qkv_features or inputs_q.shape[-1]
+    features = self.out_features or inputs_q.shape[-1]
+    qkv_features = self.qkv_features or inputs_q.shape[-1]
 
-    assert qkv_features % num_heads == 0, (
+    assert qkv_features % self.num_heads == 0, (
         'Memory dimension must be divisible by number of heads.')
-    head_dim = qkv_features // num_heads
+    head_dim = qkv_features // self.num_heads
 
     dense = DenseGeneral.partial(
         axis=-1,
-        features=(num_heads, head_dim),
-        kernel_init=kernel_init,
-        bias_init=bias_init,
-        bias=bias,
-        precision=precision)
+        features=(self.num_heads, head_dim),
+        kernel_init=self.kernel_init,
+        bias_init=self.bias_init,
+        bias=self.bias,
+        precision=self.precision)
     # project inputs_q to multi-headed q/k/v
     # dimensions are then [bs, dims..., n_heads, n_features_per_head]
-    query, key, value = (dense(inputs_q, dtype=dtype, name='query'),
-                         dense(inputs_kv, dtype=dtype, name='key'),
-                         dense(inputs_kv, dtype=dtype, name='value'))
+    query, key, value = (dense(inputs_q, dtype=self.dtype, name='query'),
+                         dense(inputs_kv, dtype=self.dtype, name='key'),
+                         dense(inputs_kv, dtype=self.dtype, name='value'))
 
-    if cache:
-      assert isinstance(cache, Cache), 'cache must be an instance of Cache'
+    if self.cache:
+      assert isinstance(self.cache, Cache), 'cache must be an instance of Cache'
       if self.is_initializing():
-        cache.store(lambda: (key.ndim, key.shape[-2:]))
+        self.cache.store(lambda: (key.ndim, key.shape[-2:]))
       else:
-        cache_entry = cache.retrieve(None)
+        cache_entry = self.cache.retrieve(None)
         expected_shape = list(cache_entry.key.shape[:-2])
-        for attn_dim in attention_axis:
+        for attn_dim in self.attention_axis:
           expected_shape[attn_dim] = 1
         expected_shape = tuple(expected_shape) + inputs_q.shape[-1:]
         if expected_shape != inputs_q.shape:
@@ -319,8 +323,8 @@ class MultiHeadDotProductAttention(base.Module):
         cshape = cache_entry.key.shape
         indices = [0] * len(cshape)
         i = cache_entry.i
-        attn_size = onp.prod(onp.take(cshape, attention_axis))
-        for attn_dim in attention_axis:
+        attn_size = onp.prod(onp.take(cshape, self.attention_axis))
+        for attn_dim in self.attention_axis:
           attn_size //= cshape[attn_dim]
           indices[attn_dim] = i // attn_size
           i = i % attn_size
@@ -331,7 +335,7 @@ class MultiHeadDotProductAttention(base.Module):
         cache_entry = cache_entry.replace(i=cache_entry.i + one,
                                           key=key,
                                           value=value)
-        cache.store(cache_entry)
+        self.cache.store(cache_entry)
 
         # TODO(levskaya): verify this is still needed in translation decoding.
         key_padding_mask = jnp.broadcast_to(
@@ -341,16 +345,16 @@ class MultiHeadDotProductAttention(base.Module):
     # create attention masks
     mask_components = []
 
-    if causal_mask:
-      if cache and not self.is_initializing():
+    if self.causal_mask:
+      if self.cache and not self.is_initializing():
         bias_pre_shape = (1,) * (key.ndim - 1)
-        attn_shape = tuple(onp.take(key.shape, attention_axis))
+        attn_shape = tuple(onp.take(key.shape, self.attention_axis))
         attn_size = onp.prod(attn_shape)
         ii = jnp.arange(attn_size, dtype=jnp.uint32)
         mask = ii < cache_entry.i
         mask_components.append(mask.reshape(bias_pre_shape + attn_shape))
       else:
-        mask_components.append(_make_causal_mask(key, attention_axis))
+        mask_components.append(_make_causal_mask(key, self.attention_axis))
 
     if padding_mask is not None:
       if key_padding_mask is None:
@@ -360,7 +364,7 @@ class MultiHeadDotProductAttention(base.Module):
           padding_mask_key=key_padding_mask,
           query_shape=query.shape,
           key_shape=key.shape,
-          attention_axis=attention_axis)
+          attention_axis=self.attention_axis)
       mask_components.append(padding_mask)
 
     if segmentation is not None:
@@ -371,7 +375,7 @@ class MultiHeadDotProductAttention(base.Module):
           padding_mask_key=key_segmentation,
           query_shape=query.shape,
           key_shape=key.shape,
-          attention_axis=attention_axis,
+          attention_axis=self.attention_axis,
           segmentation_mask=True)
       mask_components.append(segmentation_mask)
 
@@ -382,35 +386,35 @@ class MultiHeadDotProductAttention(base.Module):
 
       # attention mask in the form of attention bias
       attention_bias = lax.select(
-          attention_mask > 0, jnp.full(attention_mask.shape, 0.).astype(dtype),
-          jnp.full(attention_mask.shape, -1e10).astype(dtype))
+          attention_mask > 0, jnp.full(attention_mask.shape, 0.).astype(self.dtype),
+          jnp.full(attention_mask.shape, -1e10).astype(self.dtype))
     else:
       attention_bias = None
 
     # apply attention
-    x = attention_fn(
+    x = self.attention_fn(
         query,
         key,
         value,
-        dtype=dtype,
-        axis=attention_axis,
+        dtype=self.dtype,
+        axis=self.attention_axis,
         bias=attention_bias,
-        precision=precision,
+        precision=self.precision,
         dropout_rng=dropout_rng,
-        dropout_rate=dropout_rate,
-        broadcast_dropout=broadcast_dropout,
-        deterministic=deterministic)
+        dropout_rate=self.dropout_rate,
+        broadcast_dropout=self.broadcast_dropout,
+        deterministic=self.deterministic)
 
     # back to the original inputs dimensions
     out = DenseGeneral(
         x,
         features=features,
         axis=(-2, -1),
-        kernel_init=kernel_init,
-        bias_init=bias_init,
-        bias=bias,
-        dtype=dtype,
-        precision=precision,
+        kernel_init=self.kernel_init,
+        bias_init=self.bias_init,
+        bias=self.bias,
+        dtype=self.dtype,
+        precision=self.precision,
         name='out')
 
     return out

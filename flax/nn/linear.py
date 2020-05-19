@@ -16,6 +16,8 @@
 """Linear modules."""
 
 from collections.abc import Iterable  # pylint: disable=g-importing-member
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence, Any
 
 from . import base
 from . import initializers
@@ -35,106 +37,119 @@ def _normalize_axes(axes, ndim):
 
 
 class DenseGeneral(base.Module):
-  """A linear transformation with flexible axes."""
+  """A linear transformation with flexible axes.
 
-  def apply(self,
-            inputs,
-            features,
-            axis=-1,
-            batch_dims=(),
-            bias=True,
-            dtype=jnp.float32,
-            kernel_init=default_kernel_init,
-            bias_init=initializers.zeros,
-            precision=None):
+  Args:
+    features: tuple with numbers of output features.
+    axis: tuple with axes to apply the transformation on.
+    batch_dims: tuple with batch axes.
+    bias: whether to add a bias to the output (default: True).
+    dtype: the dtype of the computation (default: float32).
+    kernel_init: initializer function for the weight matrix.
+    bias_init: initializer function for the bias.
+    precision: numerical precision of the computation see `jax.lax.Precision`
+      for details.
+  """
+  def __init__(self,
+               features: int,
+               axis: int = -1,
+               batch_dims: Sequence[int] = (),
+               bias: bool = True,
+               dtype: Any = jnp.float32,
+               kernel_init: Callable = default_kernel_init,
+               bias_init: Callable = initializers.zeros,
+               precision: Any = None,
+               name: Optional[str] = None):
+    self.features = features
+    self.axis = axis
+    self.batch_dims = batch_dims
+    self.bias = bias
+    self.dtype = dtype
+    self.kernel_init = kernel_init
+    self.bias_init = bias_init
+    self.precision = precision
+    if not isinstance(self.features, Iterable):
+      self.features = (self.features,)
+    if not isinstance(self.axis, Iterable):
+      self.axis = (self.axis,)
+    if not isinstance(self.batch_dims, Iterable):
+      self.batch_dims = (self.batch_dims,)
+    self.features = tuple(self.features)
+    self.axis = tuple(self.axis)
+    self.batch_dims = tuple(self.batch_dims)
+    if self.batch_dims:
+      max_dim = onp.max(self.batch_dims)
+      if set(self.batch_dims) != set(range(max_dim + 1)):
+        raise ValueError('batch_dims %s must be consecutive leading '
+                         'dimensions starting from 0.' % str(batch_dims))
+    self.name = name
+
+  def apply(self, inputs):
     """Applies a linear transformation to the inputs along multiple dimensions.
 
     Args:
       inputs: The nd-array to be transformed.
-      features: tuple with numbers of output features.
-      axis: tuple with axes to apply the transformation on.
-      batch_dims: tuple with batch axes.
-      bias: whether to add a bias to the output (default: True).
-      dtype: the dtype of the computation (default: float32).
-      kernel_init: initializer function for the weight matrix.
-      bias_init: initializer function for the bias.
-      precision: numerical precision of the computation see `jax.lax.Precision`
-        for details.
     Returns:
       The transformed input.
     """
-    inputs = jnp.asarray(inputs, dtype)
-
-    if not isinstance(features, Iterable):
-      features = (features,)
-    if not isinstance(axis, Iterable):
-      axis = (axis,)
-    if not isinstance(batch_dims, Iterable):
-      batch_dims = (batch_dims,)
-    features, axis, batch_dims = tuple(features), tuple(axis), tuple(batch_dims)
-
-    if batch_dims:
-      max_dim = onp.max(batch_dims)
-      if set(batch_dims) != set(range(max_dim + 1)):
-        raise ValueError('batch_dims %s must be consecutive leading '
-                         'dimensions starting from 0.' % str(batch_dims))
-
+    inputs = jnp.asarray(inputs, self.dtype)
     ndim = inputs.ndim
-    n_batch_dims = len(batch_dims)
-    axis = _normalize_axes(axis, ndim)
-    batch_dims = _normalize_axes(batch_dims, ndim)
-    n_axis, n_features = len(axis), len(features)
+    n_batch_dims = len(self.batch_dims)
+    axis = _normalize_axes(self.axis, ndim)
+    batch_dims = _normalize_axes(self.batch_dims, ndim)
+    n_axis, n_features = len(axis), len(self.features)
 
     def kernel_init_wrap(rng, shape, dtype=jnp.float32):
       size_batch_dims = onp.prod(shape[:n_batch_dims], dtype=onp.int32)
       flat_shape = (onp.prod(shape[n_batch_dims:n_axis + n_batch_dims]),
                     onp.prod(shape[-n_features:]),)
-      kernel = jnp.concatenate([kernel_init(rng, flat_shape, dtype)
+      kernel = jnp.concatenate([self.kernel_init(rng, flat_shape, self.dtype)
                                 for _ in range(size_batch_dims)], axis=0)
       return jnp.reshape(kernel, shape)
 
     batch_shape = tuple([inputs.shape[ax] for ax in batch_dims])
-    kernel_shape = tuple([inputs.shape[ax] for ax in axis]) + features
+    kernel_shape = tuple([inputs.shape[ax] for ax in axis]) + self.features
     kernel = self.param('kernel', batch_shape + kernel_shape, kernel_init_wrap)
-    kernel = jnp.asarray(kernel, dtype)
+    kernel = jnp.asarray(kernel, self.dtype)
 
     batch_ind = tuple(range(n_batch_dims))
     contract_ind = tuple(range(n_batch_dims, n_axis + n_batch_dims))
     out = lax.dot_general(inputs,
                           kernel,
                           ((axis, contract_ind), (batch_dims, batch_ind)),
-                          precision=precision)
-    if bias:
+                          precision=self.precision)
+    if self.bias:
       def bias_init_wrap(rng, shape, dtype=jnp.float32):
         size_batch_dims = onp.prod(shape[:n_batch_dims], dtype=onp.int32)
         flat_shape = (onp.prod(shape[-n_features:]),)
-        bias = jnp.concatenate([bias_init(rng, flat_shape, dtype)
+        bias = jnp.concatenate([self.bias_init(rng, flat_shape, dtype)
                                 for _ in range(size_batch_dims)], axis=0)
         return jnp.reshape(bias, shape)
 
-      bias = self.param('bias', batch_shape + features, bias_init_wrap)
+      bias = self.param('bias', batch_shape + self.features, bias_init_wrap)
 
       # Reshape bias for broadcast.
       expand_dims = sorted(
           set(range(inputs.ndim)) - set(axis) - set(batch_dims))
       for ax in expand_dims:
         bias = jnp.expand_dims(bias, ax)
-      bias = jnp.asarray(bias, dtype)
+      bias = jnp.asarray(bias, self.dtype)
       out = out + bias
     return out
 
 
+@dataclass
 class Dense(base.Module):
   """A linear transformation applied over the last dimension of the input."""
+  features: int
+  bias: bool = True
+  dtype: Any = jnp.float32
+  precision: Any = None
+  kernel_init: Any = default_kernel_init
+  bias_init: Any = initializers.zeros
+  name: Optional[str] = None
 
-  def apply(self,
-            inputs,
-            features,
-            bias=True,
-            dtype=jnp.float32,
-            precision=None,
-            kernel_init=default_kernel_init,
-            bias_init=initializers.zeros):
+  def apply(self, inputs):
     """Applies a linear transformation to the inputs along the last dimension.
 
     Args:
@@ -149,15 +164,15 @@ class Dense(base.Module):
     Returns:
       The transformed input.
     """
-    inputs = jnp.asarray(inputs, dtype)
-    kernel = self.param('kernel', (inputs.shape[-1], features), kernel_init)
-    kernel = jnp.asarray(kernel, dtype)
+    inputs = jnp.asarray(inputs, self.dtype)
+    kernel = self.param('kernel', (inputs.shape[-1], self.features), self.kernel_init)
+    kernel = jnp.asarray(kernel, self.dtype)
     y = lax.dot_general(inputs, kernel,
                         (((inputs.ndim - 1,), (0,)), ((), ())),
-                        precision=precision)
-    if bias:
-      bias = self.param('bias', (features,), bias_init)
-      bias = jnp.asarray(bias, dtype)
+                        precision=self.precision)
+    if self.bias:
+      bias = self.param('bias', (self.features,), self.bias_init)
+      bias = jnp.asarray(bias, self.dtype)
       y = y + bias
     return y
 
@@ -311,17 +326,18 @@ default_embed_init = initializers.variance_scaling(1.0, 'fan_in', 'normal',
                                                    out_axis=0)
 
 
+@dataclass
 class Embed(base.Module):
   """Embedding Module.
 
   A parameterized function from integers [0, n) to d-dimensional vectors.
   """
+  num_embeddings: int
+  features: int
+  embedding_init: Callable = default_embed_init
+  name: Optional[str] = None
 
-  def apply(self,
-            inputs,
-            num_embeddings,
-            features,
-            embedding_init=default_embed_init):
+  def apply(self, inputs):
     """Embeds the inputs along the last dimension.
 
     Args:
@@ -336,11 +352,10 @@ class Embed(base.Module):
     """
     if inputs.dtype not in [jnp.int32, jnp.int64, jnp.uint32, jnp.uint64]:
       raise ValueError('Input type must be an integer or unsigned integer.')
-    embedding = self.param('embedding', (num_embeddings, features),
-                           embedding_init)
+    embedding = self.param('embedding', (self.num_embeddings, self.features),
+                           self.embedding_init)
     return embedding[inputs]
 
-  @base.module_method
   def attend(self, query, **unused_kwargs):
     """Attend over the embedding using a query array.
 
