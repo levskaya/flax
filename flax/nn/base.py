@@ -32,6 +32,7 @@ import jax
 from jax import random
 
 
+_top_level = object()  # sentinel for marking top-level init'd Modules
 _module_stack = utils.CallStack()
 _state_stack = utils.CallStack()
 
@@ -123,6 +124,57 @@ def _fold_in_str(rng, data):
   return random.fold_in(rng, hash_int)
 
 
+def init(module_fn, _rng, *args, name=None, **kwargs):
+  """Initialize the module parameters.
+
+  Args:
+    module_fn: the module method.
+    _rng: the random number generator used to initialize parameters.
+    *args: arguments passed to the module's apply function
+    name: name of this module.
+    **kwargs: keyword arguments passed to the module's apply function
+  Returns:
+    A pair consisting of the model output and the initialized parameters
+  """
+  assert inspect.ismethod(module_fn), "only inits via Module methods."
+  module_instance = module_fn.__self__
+  if _module_stack:
+    parent = _module_stack[-1]
+  else:
+    parent = None
+
+  frame = _ModuleFrame(name, rng=_rng, parent=parent)
+  with module_instance._with_instance(frame):
+    y = module_fn(*args, **kwargs)
+  return y, frame.params
+
+
+def call(module_fn, params, *args, name=None, **kwargs):
+  """Evaluate the module with the given parameters.
+
+  Args:
+    module_fn: the module method.
+    params: the parameters of the module. Typically, inital parameter values
+      are constructed using `Module.init` or `Module.init_by_shape`.
+    *args: arguments passed to the module's apply function
+    name: name of this module.
+    **kwargs: keyword arguments passed to the module's apply function
+  Returns:
+    The output of the module's apply function.
+  """
+  assert inspect.ismethod(module_fn), "only calls Module methods."
+  module_instance = module_fn.__self__
+  if _module_stack:
+    parent = _module_stack[-1]
+  else:
+    parent = None
+
+  frame = _ModuleFrame(name, params=params, parent=parent)
+  with module_instance._with_instance(frame):
+    y = module_fn(*args, **kwargs)
+  return y
+
+
 class Module:
   """Functional modules."""
 
@@ -133,32 +185,35 @@ class Module:
     if _module_stack:
       instance._parent = _module_stack[-1]
     else:
-      instance._parent = None # sentinel instead?
+      instance._parent = _top_level
     return instance
 
   def __call__(self, *args, **kwargs):
     if not _module_stack:
       raise ValueError('A Module should only be instantiated directly inside'
                        ' another module.')
+    parent = self._parent
     # needed for top-level multi-method module-instance attr inits
-    if not self._parent:
-      self._parent = _module_stack[-1]
+    if parent is _top_level:
+      parent = _module_stack[-1]
 
     if not hasattr(self, 'name') or self.name is None:
-      self.name = type(self).__name__ + '_' + self._parent.create_name()
-    self._check_name(self.name, self._parent)
+      self.name = type(self).__name__ + '_' + parent.create_name()
+    self._check_name(self.name, parent)
 
-    if self._parent.is_init and self.name not in self._parent.params:
-      rng = _fold_in_str(self._parent.rng, self.name)
+    if parent.is_init:
+      if self.name in parent.params:
+        raise ValueError(f'A module with named "{self.name}" already exists.')
+      rng = _fold_in_str(parent.rng, self.name)
       params = {}
-      self._parent.params[self.name] = params
+      parent.params[self.name] = params
     else:  # apply
-      if self.name not in self._parent.params:
+      if self.name not in parent.params:
         raise ValueError(f'No module named {self.name} was created during'
                          ' initialization.')
-      params = self._parent.params[self.name]
+      params = parent.params[self.name]
       rng = None
-    frame = _ModuleFrame(self.name, parent=self._parent, rng=rng, params=params)
+    frame = _ModuleFrame(self.name, parent=parent, rng=rng, params=params)
 
     with self._with_instance(frame):
       y = self.apply(*args, **kwargs)
@@ -367,8 +422,8 @@ class Module:
         raise ValueError('Name must be a string.')
       if '/' in name or ':' in name:
         raise ValueError('Name should not contain slashes or colons.')
-      if name in parent.params:
-        raise ValueError(f'A module with named "{name}" already exists.')
+      #if name in parent.params:
+      #  raise ValueError(f'A module with named "{name}" already exists.')
 
 
 def module(fun):

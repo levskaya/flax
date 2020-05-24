@@ -67,10 +67,9 @@ class AddPositionEmbs(nn.Module):
   """Adds (optionally learned) positional embeddings to the inputs."""
   max_len: int = 512
   posemb_init: Callable = None
-  cache: Any = None
   name: Optional[str] = None
 
-  def apply(self, inputs, inputs_positions=None):
+  def apply(self, inputs, inputs_positions=None, cache=None):
     """Applies AddPositionEmbs module.
 
     By default this layer uses a fixed sinusoidal embedding table. If a
@@ -104,13 +103,13 @@ class AddPositionEmbs(nn.Module):
     # in fast predict mode. We could use state variables instead, but this
     # simplifies invocation with a single top-level cache context manager.
     # We only use the cache's position index for tracking decoding position.
-    if self.cache:
+    if cache:
       if self.is_initializing():
-        self.cache.store(lambda: (4, (1, 1)))
+        cache.store(lambda: (4, (1, 1)))
       else:
-        cache_entry = self.cache.retrieve(None)
+        cache_entry = cache.retrieve(None)
         i = cache_entry.i
-        self.cache.store(cache_entry.replace(i=cache_entry.i + 1))
+        cache.store(cache_entry.replace(i=cache_entry.i + 1))
         _, _, df = pos_embedding.shape
         pe = lax.dynamic_slice(pos_embedding,
                                jnp.array((0, i, 0)),
@@ -225,7 +224,6 @@ class EncoderDecoder1DBlock(nn.Module):
   dropout_rate: float = 0.1
   attention_dropout_rate: float = 0.1
   deterministic: bool = False
-  cache: Any = None
   name: Optional[str] = None
 
   def apply(self,
@@ -234,7 +232,8 @@ class EncoderDecoder1DBlock(nn.Module):
             inputs_segmentation=None,
             targets_segmentation=None,
             padding_mask=None,
-            key_padding_mask=None):
+            key_padding_mask=None,
+            cache=None):
     """Applies EncoderDecoder1DBlock module.
 
     Args:
@@ -272,17 +271,17 @@ class EncoderDecoder1DBlock(nn.Module):
         bias=False,
         broadcast_dropout=False,
         dropout_rate=self.attention_dropout_rate,
-        deterministic=self.deterministic,
-        cache=self.cache)(
+        deterministic=self.deterministic)(
             inputs_q=x,
             inputs_kv=x,
             padding_mask=padding_mask,
-            segmentation=targets_segmentation)
+            segmentation=targets_segmentation,
+            cache=cache)
     x = nn.dropout(x, rate=self.dropout_rate, deterministic=self.deterministic)
     x = x + targets
 
     # Encoder-Decoder block.
-    y = nn.LayerNorm(type=self.dtype)(x)
+    y = nn.LayerNorm(dtype=self.dtype)(x)
     y = nn.MultiHeadDotProductAttention(
         num_heads=self.num_heads,
         dtype=self.dtype,
@@ -375,9 +374,8 @@ class Encoder(nn.Module):
     x = inputs.astype('int32')
     x = input_embed(x)
     x = AddPositionEmbs(
-        inputs_positions=inputs_positions,
         max_len=self.max_len,
-        name='posembed_input')(x)
+        name='posembed_input')(x, inputs_positions=inputs_positions)
     x = nn.dropout(x, rate=self.dropout_rate, deterministic=not self.train)
 
     if self.use_bfloat16:
@@ -389,7 +387,6 @@ class Encoder(nn.Module):
     # Input Encoder
     for lyr in range(self.num_layers):
       x = Encoder1DBlock(
-          x,
           qkv_dim=self.qkv_dim,
           mlp_dim=self.mlp_dim,
           num_heads=self.num_heads,
@@ -423,7 +420,6 @@ class Decoder(nn.Module):
   train: bool = True
   dropout_rate: float = 0.1
   attention_dropout_rate: float = 0.1
-  cache: Any = None
   name: Optional[str] = None
 
   def apply(self,
@@ -433,7 +429,8 @@ class Decoder(nn.Module):
             targets_positions=None,
             inputs_segmentation=None,
             targets_segmentation=None,
-            tgt_padding_mask=None):
+            tgt_padding_mask=None,
+            cache=None):
     """Applies Transformer model on the inputs.
 
     Args:
@@ -485,10 +482,9 @@ class Decoder(nn.Module):
       y = shift_right(y)
     y = output_embed(y)
     y = AddPositionEmbs(
-        inputs_positions=targets_positions,
         max_len=self.max_len,
-        cache=self.cache,
-        name='posembed_output')(y)
+        name='posembed_output')(
+          y, inputs_positions=targets_positions, cache=cache)
     y = nn.dropout(y, rate=self.dropout_rate, deterministic=not self.train)
 
     if self.use_bfloat16:
@@ -507,7 +503,6 @@ class Decoder(nn.Module):
           dropout_rate=self.dropout_rate,
           attention_dropout_rate=self.attention_dropout_rate,
           deterministic=not self.train,
-          cache=self.cache,
           name=f'encoderdecoderblock_{lyr}')(
               y,
               encoded,
@@ -515,6 +510,7 @@ class Decoder(nn.Module):
               key_padding_mask=src_padding_mask,
               inputs_segmentation=inputs_segmentation,
               targets_segmentation=targets_segmentation,
+              cache=cache,
           )
     y = nn.LayerNorm(dtype=dtype, name='encoderdecoder_norm')(y)
 
@@ -536,6 +532,7 @@ class Decoder(nn.Module):
 
 class Transformer(nn.Module):
   """Transformer Model for sequence to sequence translation."""
+  # NOTE: could use dataclass w. __post_init__ method instead:
   def __init__(
       self,
       vocab_size=None,
@@ -553,7 +550,6 @@ class Transformer(nn.Module):
       shift=True,
       dropout_rate=0.1,
       attention_dropout_rate=0.1,
-      cache=None,
       name=None):
     self.name = name
     self.use_bfloat16 = use_bfloat16
@@ -599,7 +595,6 @@ class Transformer(nn.Module):
         shift=shift,
         dropout_rate=dropout_rate,
         attention_dropout_rate=attention_dropout_rate,
-        cache=cache,
         name='decoder')
 
 
@@ -610,7 +605,8 @@ class Transformer(nn.Module):
             targets_positions=None,
             inputs_segmentation=None,
             targets_segmentation=None,
-            tgt_padding_mask=None):
+            tgt_padding_mask=None,
+            cache=None):
     """Applies Transformer model on the inputs.
 
     Args:
@@ -657,7 +653,8 @@ class Transformer(nn.Module):
         targets_positions=targets_positions,
         inputs_segmentation=inputs_segmentation,
         targets_segmentation=targets_segmentation,
-        tgt_padding_mask=tgt_padding_mask)
+        tgt_padding_mask=tgt_padding_mask,
+        cache=cache)
 
     return logits.astype(jnp.float32) if self.use_bfloat16 else logits
 
@@ -680,7 +677,8 @@ class Transformer(nn.Module):
              targets_positions=None,
              inputs_segmentation=None,
              targets_segmentation=None,
-             tgt_padding_mask=None):
+             tgt_padding_mask=None,
+             cache=None):
 
     logits = self.decoder(
         encoded,
@@ -689,6 +687,7 @@ class Transformer(nn.Module):
         targets_positions=targets_positions,
         inputs_segmentation=inputs_segmentation,
         targets_segmentation=targets_segmentation,
-        tgt_padding_mask=tgt_padding_mask)
+        tgt_padding_mask=tgt_padding_mask,
+        cache=cache)
 
     return logits

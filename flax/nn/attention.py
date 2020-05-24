@@ -17,6 +17,7 @@
 
 from collections.abc import Iterable  # pylint: disable=g-importing-member
 from dataclasses import dataclass
+from functools import partial
 from typing import Callable, Optional, Sequence, Any
 
 import warnings
@@ -214,7 +215,6 @@ class MultiHeadDotProductAttention(base.Module):
   kernel_init: Callable = default_kernel_init
   bias_init: Callable = initializers.zeros
   bias: bool = True
-  cache: Any = None
   attention_fn: Callable = dot_product_attention
   name: Optional[str] = None
 
@@ -225,7 +225,8 @@ class MultiHeadDotProductAttention(base.Module):
             key_padding_mask=None,
             segmentation=None,
             key_segmentation=None,
-            dropout_rng=None):
+            dropout_rng=None,
+            cache=None):
     """Applies multi-head dot product attention on the input data.
 
     Projects the inputs into multi-headed query, key, and value vectors,
@@ -273,7 +274,7 @@ class MultiHeadDotProductAttention(base.Module):
       output of shape `[bs, dim1, dim2, ..., dimN, features]`.
     """
 
-    assert self.causal_mask or not self.cache, (
+    assert self.causal_mask or not cache, (
         'Caching is only support for causal attention.')
 
     if inputs_kv is None:
@@ -289,7 +290,7 @@ class MultiHeadDotProductAttention(base.Module):
         'Memory dimension must be divisible by number of heads.')
     head_dim = qkv_features // self.num_heads
 
-    dense = DenseGeneral.partial(
+    dense = partial(DenseGeneral,
         axis=-1,
         features=(self.num_heads, head_dim),
         kernel_init=self.kernel_init,
@@ -298,16 +299,16 @@ class MultiHeadDotProductAttention(base.Module):
         precision=self.precision)
     # project inputs_q to multi-headed q/k/v
     # dimensions are then [bs, dims..., n_heads, n_features_per_head]
-    query, key, value = (dense(inputs_q, dtype=self.dtype, name='query'),
-                         dense(inputs_kv, dtype=self.dtype, name='key'),
-                         dense(inputs_kv, dtype=self.dtype, name='value'))
+    query, key, value = (dense(dtype=self.dtype, name='query')(inputs_q),
+                         dense(dtype=self.dtype, name='key')(inputs_kv),
+                         dense(dtype=self.dtype, name='value')(inputs_kv))
 
-    if self.cache:
-      assert isinstance(self.cache, Cache), 'cache must be an instance of Cache'
+    if cache:
+      assert isinstance(cache, Cache), 'cache must be an instance of Cache'
       if self.is_initializing():
-        self.cache.store(lambda: (key.ndim, key.shape[-2:]))
+        cache.store(lambda: (key.ndim, key.shape[-2:]))
       else:
-        cache_entry = self.cache.retrieve(None)
+        cache_entry = cache.retrieve(None)
         expected_shape = list(cache_entry.key.shape[:-2])
         for attn_dim in self.attention_axis:
           expected_shape[attn_dim] = 1
@@ -335,7 +336,7 @@ class MultiHeadDotProductAttention(base.Module):
         cache_entry = cache_entry.replace(i=cache_entry.i + one,
                                           key=key,
                                           value=value)
-        self.cache.store(cache_entry)
+        cache.store(cache_entry)
 
         # TODO(levskaya): verify this is still needed in translation decoding.
         key_padding_mask = jnp.broadcast_to(
@@ -346,7 +347,7 @@ class MultiHeadDotProductAttention(base.Module):
     mask_components = []
 
     if self.causal_mask:
-      if self.cache and not self.is_initializing():
+      if cache and not self.is_initializing():
         bias_pre_shape = (1,) * (key.ndim - 1)
         attn_shape = tuple(onp.take(key.shape, self.attention_axis))
         attn_size = onp.prod(attn_shape)
@@ -407,7 +408,6 @@ class MultiHeadDotProductAttention(base.Module):
 
     # back to the original inputs dimensions
     out = DenseGeneral(
-        x,
         features=features,
         axis=(-2, -1),
         kernel_init=self.kernel_init,
@@ -415,7 +415,7 @@ class MultiHeadDotProductAttention(base.Module):
         bias=self.bias,
         dtype=self.dtype,
         precision=self.precision,
-        name='out')
+        name='out')(x)
 
     return out
 
