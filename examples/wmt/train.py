@@ -218,29 +218,6 @@ def create_learning_rate_scheduler(
   return step_fn
 
 
-@functools.partial(jax.jit, static_argnums=(1, 2, 3))
-def create_model(key, input_shape, target_shape, model_kwargs):
-  """Instantiate transformer model and associated autoregressive cache def."""
-  model_def = models.Transformer.partial(**model_kwargs)
-  with nn.attention.Cache().mutate() as cache_def:
-    _, initial_params = model_def.init_by_shape(
-        key, [(input_shape, jnp.float32), (target_shape, jnp.float32)],
-        cache=cache_def)
-    model = nn.Model(model_def, initial_params)
-  return model, cache_def
-
-
-def create_optimizer(model, learning_rate, weight_decay):
-  optimizer_def = optim.Adam(
-      learning_rate,
-      beta1=0.9,
-      beta2=0.98,
-      eps=1e-9,
-      weight_decay=weight_decay)
-  optimizer = optimizer_def.create(model)
-  return optimizer
-
-
 def compute_weighted_cross_entropy(logits,
                                    targets,
                                    weights=None,
@@ -317,11 +294,11 @@ def compute_metrics(logits, labels, weights, label_smoothing=0.0):
   return metrics
 
 
-def train_step(optimizer,
+def train_step(model,
+               optimizer,
                batch,
                learning_rate_fn,
                label_smoothing=0.0,
-               use_bfloat16=False,
                dropout_rng=None):
   """Perform a single training step."""
   # X_position and X_segmentation are needed only when using 'packed examples'
@@ -341,18 +318,17 @@ def train_step(optimizer,
   # We handle PRNG splitting inside the top pmap to improve efficiency.
   dropout_rng, new_dropout_rng = random.split(dropout_rng)
 
-  def loss_fn(model):
+  def loss_fn(params):
     """loss function used for training."""
     with nn.stochastic(dropout_rng):
-      logits = model(
+      logits = model.call(
+          params,
           inputs,
           targets,
-          use_bfloat16=use_bfloat16,
           inputs_positions=inputs_positions,
           targets_positions=targets_positions,
           inputs_segmentation=inputs_segmentation,
           targets_segmentation=targets_segmentation,
-          train=True,
           cache=None)
 
     loss, weight_sum = compute_weighted_cross_entropy(logits, targets, weights,
@@ -372,17 +348,15 @@ def train_step(optimizer,
   return new_optimizer, metrics, new_dropout_rng
 
 
-def eval_step(model, batch, label_smoothing=0.0, use_bfloat16=False):
+def eval_step(model, params, batch, label_smoothing=0.0):
   """Calculate evaluation metrics on a batch."""
   inputs, targets = batch['inputs'], batch['targets']
   weights = jnp.where(targets > 0, 1.0, 0.0)
-  logits = model(inputs, targets, use_bfloat16=use_bfloat16, train=False,
-                 cache=None)
+  logits = model.call(params, inputs, targets)
   return compute_metrics(logits, targets, weights, label_smoothing)
 
 
-def predict_step(inputs, model, cache, eos_token, max_decode_len,
-                 use_bfloat16=False):
+def predict_step(model, params, inputs, cache, eos_token, max_decode_len):
   """Predict translation with fast decoding beam search on a batch."""
   batch_size = inputs.shape[0]
   beam_size = 4
@@ -398,20 +372,16 @@ def predict_step(inputs, model, cache, eos_token, max_decode_len,
   tgt_padding_mask = decode.flat_batch_beam_expand(
       jnp.ones((batch_size, 1, 1)), beam_size)
   encoded_inputs = decode.flat_batch_beam_expand(
-      model.encode(inputs, use_bfloat16=use_bfloat16,
-                   train=False, cache=None), beam_size)
+      nn.call(model.encode, params, inputs), beam_size)
 
   def tokens_ids_to_logits(flat_ids, flat_cache):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
     with flat_cache.mutate() as new_flat_cache:
-      flat_logits = model.decode(encoded_inputs,
+      flat_logits = nn.call(model.decode, params, encoded_inputs,
                                  src_padding_mask,
                                  flat_ids,
                                  cache=new_flat_cache,
-                                 shift=False,
-                                 train=False,
-                                 use_bfloat16=use_bfloat16,
                                  tgt_padding_mask=tgt_padding_mask)
     # Remove singleton sequence-length dimension:
     # [batch * beam, 1, vocab] --> [batch * beam, vocab]
@@ -523,6 +493,7 @@ def main(argv):
       'max_len': max(FLAGS.max_target_length, FLAGS.max_eval_target_length),
       'share_embeddings': FLAGS.share_embeddings,
       'logits_via_embedding': FLAGS.logits_via_embedding,
+      'use_bfloat16': FLAGS.use_bfloat16
   }
 
   start_step = 0
@@ -530,15 +501,31 @@ def main(argv):
   rng, init_rng = random.split(rng)
   input_shape = (FLAGS.batch_size, FLAGS.max_target_length)
   target_shape = (FLAGS.batch_size, FLAGS.max_target_length)
-  model, cache_def = create_model(init_rng,
-                                  input_shape,
-                                  target_shape,
-                                  transformer_kwargs)
-  optimizer = create_optimizer(model,
-                               FLAGS.learning_rate,
-                               FLAGS.weight_decay)
-  # We access model only from optimizer below via optimizer.target.
-  del model
+
+  train_model = models.Transformer(**transformer_kwargs, train=True, shift=True)
+  eval_model = models.Transformer(**transformer_kwargs, train=False, shift=True)
+  pred_model = models.Transformer(**transformer_kwargs, train=False, shift=False)
+
+  # initialize parameters and gather shape information for autoregressive cache
+  @jax.jit
+  def initialize_params(key):
+    with nn.stochastic(key), nn.attention.Cache().mutate() as cache_def:
+      _, initial_params = train_model.init_by_shape(
+          key, [(input_shape, jnp.float32),
+                (target_shape, jnp.float32)],
+          cache=cache_def)
+    return initial_params, cache_def
+  params, cache_def = initialize_params(init_rng)
+
+  # initialize optimizer
+  optimizer = optim.Adam(
+      FLAGS.learning_rate,
+      beta1=0.9,
+      beta2=0.98,
+      eps=1e-9,
+      weight_decay=FLAGS.weight_decay).create(params)
+  # We access params only from optimizer below via optimizer.target.
+  del params
 
   if FLAGS.restore_checkpoints:
     # Restore unreplicated optimizer + model state from last checkpoint.
@@ -556,20 +543,20 @@ def main(argv):
   p_train_step = jax.pmap(
       functools.partial(
           train_step,
+          train_model,
           learning_rate_fn=learning_rate_fn,
-          label_smoothing=FLAGS.label_smoothing,
-          use_bfloat16=FLAGS.use_bfloat16),
+          label_smoothing=FLAGS.label_smoothing),
       axis_name='batch')
   p_eval_step = jax.pmap(
       functools.partial(
           eval_step,
-          label_smoothing=FLAGS.label_smoothing,
-          use_bfloat16=FLAGS.use_bfloat16),
+          eval_model,
+          label_smoothing=FLAGS.label_smoothing),
       axis_name='batch')
   p_pred_step = jax.pmap(
       functools.partial(
-        predict_step,
-        use_bfloat16=FLAGS.use_bfloat16),
+          predict_step,
+          pred_model),
       axis_name='batch',
       static_broadcasted_argnums=(3, 4))  # eos token, max_length are constant
 
@@ -662,8 +649,8 @@ def main(argv):
           cache_def.initialize_cache((per_device_batchsize,
                                       FLAGS.max_predict_length),
                                      dtype=cache_dtype))
-      predicted = p_pred_step(pred_batch['inputs'],
-                              optimizer.target,
+      predicted = p_pred_step(optimizer.target,
+                              pred_batch['inputs'],
                               cache,
                               eos_token,
                               FLAGS.max_predict_length)
