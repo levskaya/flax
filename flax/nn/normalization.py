@@ -19,6 +19,7 @@ from . import base
 from jax import lax
 from jax.nn import initializers
 import jax.numpy as jnp
+from ..core import Scope
 
 
 _no_init = lambda rng, shape: ()
@@ -170,6 +171,51 @@ class LayerNorm(base.Module):
     if bias:
       y = y + jnp.asarray(self.param('bias', (features,), bias_init), dtype)
     return y
+
+
+def layer_norm(
+    scope: Scope,
+    x,
+    epsilon=1e-6,
+    dtype=jnp.float32,
+    bias=True,
+    scale=True,
+    bias_init=initializers.zeros,
+    scale_init=initializers.ones):
+  """Applies layer normalization on the input.
+
+  It normalizes the activations of the layer for each given example in a
+  batch independently, rather than across a batch like Batch Normalization.
+  i.e. applies a transformation that maintains the mean activation within
+  each example close to 0 and the activation standard deviation close to 1.
+
+  Args:
+    x: the inputs
+    epsilon: A small float added to variance to avoid dividing by zero.
+    dtype: the dtype of the computation (default: float32).
+    bias:  If True, bias (beta) is added.
+    scale: If True, multiply by scale (gamma). When the next layer is linear
+      (also e.g. nn.relu), this can be disabled since the scaling will be done
+      by the next layer.
+    bias_init: Initializer for bias, by default, zero.
+    scale_init: Initializer for scale, by default, one.
+
+  Returns:
+    Normalized inputs (the same shape as inputs).
+
+  """
+  features = x.shape[-1]
+  mean = jnp.mean(x, axis=-1, keepdims=True)
+  mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
+  var = mean2 - lax.square(mean)
+  mul = lax.rsqrt(var + epsilon)
+  if scale:
+    mul = mul * jnp.asarray(scope.param('scale', scale_init, (features,)),
+                            dtype)
+  y = (x - mean) * mul
+  if bias:
+    y = y + jnp.asarray(scope.param('bias', bias_init, (features,)), dtype)
+  return y
 
 
 class GroupNorm(base.Module):

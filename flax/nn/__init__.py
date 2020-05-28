@@ -19,12 +19,11 @@
 from .activation import (celu, elu, gelu, glu, leaky_relu, log_sigmoid,
                          log_softmax, relu, sigmoid, soft_sign, softmax,
                          softplus, swish, tanh)
-from .attention import (dot_product_attention, MultiHeadDotProductAttention,
-                        SelfAttention)
+from .attention import (dot_product_attention, multi_head_dot_product_attention)
 from .base import (Module, Model, Collection, capture_module_outputs,
                    module, stateful, get_state, module_method)
-from .linear import Dense, DenseGeneral, Conv, ConvTranspose, Embed
-from .normalization import BatchNorm, LayerNorm, GroupNorm
+from .linear import Dense, dense, DenseGeneral, dense_general, Conv, ConvTranspose, Embed, embedding
+from .normalization import BatchNorm, LayerNorm, layer_norm, GroupNorm
 from .pooling import max_pool, avg_pool
 from .recurrent import LSTMCell, GRUCell
 from .stochastic import make_rng, stochastic, dropout, is_stochastic

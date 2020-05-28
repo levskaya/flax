@@ -87,7 +87,34 @@ def make_rng():
   return rng_frame.make_rng()
 
 
-def dropout(inputs, rate, deterministic=False, rng=None):
+# def dropout(inputs, rate, deterministic=False, rng=None):
+#   """Applies a random dropout mask to the input.
+
+#   Args:
+#     inputs: the inputs that should be randomly masked.
+#     rate: the probablity of masking out a value.
+#     deterministic: if false the inputs are scaled by `1 / (1 - rate)` and
+#       masked, whereas if true, no mask is applied and the inputs are returned as
+#       is.
+#     rng: an optional `jax.random.PRNGKey`. By default `nn.make_rng()` will
+#       be used.
+#   Returns:
+#     The masked inputs.
+#   """
+#   if rate == 0.:
+#     return inputs
+#   keep_prob = 1. - rate
+
+#   if deterministic:
+#     return inputs
+#   else:
+#     if rng is None:
+#       rng = make_rng()
+#     mask = random.bernoulli(rng, p=keep_prob, shape=inputs.shape)
+#     return lax.select(mask, inputs / keep_prob, jnp.zeros_like(inputs))
+
+
+def dropout(scope, inputs, rate, deterministic=False, rng=None):
   """Applies a random dropout mask to the input.
 
   Args:
@@ -109,6 +136,6 @@ def dropout(inputs, rate, deterministic=False, rng=None):
     return inputs
   else:
     if rng is None:
-      rng = make_rng()
+      rng = scope.make_rng('dropout')
     mask = random.bernoulli(rng, p=keep_prob, shape=inputs.shape)
     return lax.select(mask, inputs / keep_prob, jnp.zeros_like(inputs))
