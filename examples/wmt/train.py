@@ -46,6 +46,7 @@ import bleu
 import decode
 import input_pipeline
 import models
+from flax.core import init, apply, FrozenDict
 from flax.metrics import tensorboard
 from flax.training import checkpoints
 from flax.training import common_utils
@@ -293,8 +294,16 @@ def compute_metrics(logits, labels, weights, label_smoothing=0.0):
   metrics = jax.lax.psum(metrics, axis_name='batch')
   return metrics
 
+def set_cache(variables, leading_shape):
+  return variables.copy(
+    cache=jax.tree_map(
+      lambda fn: fn(leading_shape) if callable(fn) else fn, variables['cache']))
 
-def train_step(model,
+def update_params(variables, optimizer):
+  return variables.copy(params=optimizer.target)
+
+def train_step(model_fn,
+               step,
                optimizer,
                batch,
                learning_rate_fn,
@@ -320,43 +329,44 @@ def train_step(model,
 
   def loss_fn(params):
     """loss function used for training."""
-    with nn.stochastic(dropout_rng):
-      logits = model.call(
-          params,
-          inputs,
-          targets,
-          inputs_positions=inputs_positions,
-          targets_positions=targets_positions,
-          inputs_segmentation=inputs_segmentation,
-          targets_segmentation=targets_segmentation,
-          cache=None)
+    logits, auxvars = apply(model_fn, mutable=True)(
+        FrozenDict(param=params),
+        inputs,
+        targets,
+        inputs_positions=inputs_positions,
+        targets_positions=targets_positions,
+        inputs_segmentation=inputs_segmentation,
+        targets_segmentation=targets_segmentation,
+        cache=None,
+        rngs=dict(dropout=dropout_rng))
 
     loss, weight_sum = compute_weighted_cross_entropy(logits, targets, weights,
                                                       label_smoothing)
     mean_loss = loss / weight_sum
-    return mean_loss, logits
+    return mean_loss, (logits, auxvars)
 
-  step = optimizer.state.step
+  #optimizer = optimizer_def.create(variables['params'])
   lr = learning_rate_fn(step)
   grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-  (_, logits), grad = grad_fn(optimizer.target)
+  (_, (logits, auxvars)), grad = grad_fn(optimizer.target)
   grad = jax.lax.pmean(grad, 'batch')
   new_optimizer = optimizer.apply_gradient(grad, learning_rate=lr)
+  auxvars = auxvars.copy(param={})
   metrics = compute_metrics(logits, targets, weights)
   metrics['learning_rate'] = lr
 
-  return new_optimizer, metrics, new_dropout_rng
+  return new_optimizer, auxvars, metrics, new_dropout_rng
 
 
-def eval_step(model, params, batch, label_smoothing=0.0):
+def eval_step(model_fn, params, batch, label_smoothing=0.0):
   """Calculate evaluation metrics on a batch."""
   inputs, targets = batch['inputs'], batch['targets']
   weights = jnp.where(targets > 0, 1.0, 0.0)
-  logits = model.call(params, inputs, targets)
+  logits = apply(model_fn)(FrozenDict(param=params), inputs, targets)
   return compute_metrics(logits, targets, weights, label_smoothing)
 
 
-def predict_step(model, params, inputs, cache, eos_token, max_decode_len):
+def predict_step(encode_fn, decode_fn, params, inputs, cache, eos_token, max_decode_len):
   """Predict translation with fast decoding beam search on a batch."""
   batch_size = inputs.shape[0]
   beam_size = 4
@@ -372,21 +382,22 @@ def predict_step(model, params, inputs, cache, eos_token, max_decode_len):
   tgt_padding_mask = decode.flat_batch_beam_expand(
       jnp.ones((batch_size, 1, 1)), beam_size)
   encoded_inputs = decode.flat_batch_beam_expand(
-      nn.call(model.encode, params, inputs), beam_size)
+      apply(encode_fn)(FrozenDict(param=params), inputs), beam_size)
 
   def tokens_ids_to_logits(flat_ids, flat_cache):
     """Token slice to logits from decoder model."""
     # --> [batch * beam, 1, vocab]
-    with flat_cache.mutate() as new_flat_cache:
-      flat_logits = nn.call(model.decode, params, encoded_inputs,
-                                 src_padding_mask,
-                                 flat_ids,
-                                 cache=new_flat_cache,
-                                 tgt_padding_mask=tgt_padding_mask)
+    flat_logits, new_vars = apply(decode_fn, mutable=True)(
+        FrozenDict(param=params, cache=flat_cache),
+        encoded_inputs,
+        src_padding_mask,
+        flat_ids,
+        cache=True,
+        tgt_padding_mask=tgt_padding_mask)
     # Remove singleton sequence-length dimension:
     # [batch * beam, 1, vocab] --> [batch * beam, vocab]
     flat_logits = flat_logits.squeeze(axis=1)
-    return flat_logits, new_flat_cache
+    return flat_logits, new_vars['cache'] # new_flat_cache
 
   # Using the above-defined single-step decoder function, run a
   # beam search over possible sequences given input encoding.
@@ -438,6 +449,8 @@ def main(argv):
   if FLAGS.jax_backend_target:
     jax.config.FLAGS.jax_xla_backend = "tpu_driver"
     jax.config.FLAGS.jax_backend_target = FLAGS.jax_backend_target
+  import tpu_converter
+  tpu_converter.convert_to_tpu()
 
   # This seems to be necessary even when importing TF2?
   tf.enable_v2_behavior()
@@ -502,20 +515,26 @@ def main(argv):
   input_shape = (FLAGS.batch_size, FLAGS.max_target_length)
   target_shape = (FLAGS.batch_size, FLAGS.max_target_length)
 
-  train_model = models.Transformer(**transformer_kwargs, train=True, shift=True)
-  eval_model = models.Transformer(**transformer_kwargs, train=False, shift=True)
-  pred_model = models.Transformer(**transformer_kwargs, train=False, shift=False)
+  model_fn = functools.partial(models.transformer, **transformer_kwargs, shift=True)
+  pred_encode = functools.partial(
+    models.transformer_encode, **transformer_kwargs, train=False)
+  pred_decode = functools.partial(
+    models.transformer_decode, **transformer_kwargs, train=False, shift=False)
 
   # initialize parameters and gather shape information for autoregressive cache
   @jax.jit
-  def initialize_params(key):
-    with nn.stochastic(key), nn.attention.Cache().mutate() as cache_def:
-      _, initial_params = train_model.init_by_shape(
-          key, [(input_shape, jnp.float32),
-                (target_shape, jnp.float32)],
-          cache=cache_def)
-    return initial_params, cache_def
-  params, cache_def = initialize_params(init_rng)
+  def initialize_variables(key):
+    _, variables = init(model_fn)(
+        key,
+        jnp.ones(input_shape, jnp.float32),
+        jnp.ones(target_shape, jnp.float32),
+        cache=True,
+        train=False)
+    return variables
+  variables = initialize_variables(init_rng)
+
+  cache_def = variables['cache']
+  params = variables['param']
 
   # initialize optimizer
   optimizer = optim.Adam(
@@ -524,8 +543,6 @@ def main(argv):
       beta2=0.98,
       eps=1e-9,
       weight_decay=FLAGS.weight_decay).create(params)
-  # We access params only from optimizer below via optimizer.target.
-  del params
 
   if FLAGS.restore_checkpoints:
     # Restore unreplicated optimizer + model state from last checkpoint.
@@ -543,20 +560,21 @@ def main(argv):
   p_train_step = jax.pmap(
       functools.partial(
           train_step,
-          train_model,
+          model_fn,
           learning_rate_fn=learning_rate_fn,
           label_smoothing=FLAGS.label_smoothing),
       axis_name='batch')
   p_eval_step = jax.pmap(
       functools.partial(
           eval_step,
-          eval_model,
+          model_fn,
           label_smoothing=FLAGS.label_smoothing),
       axis_name='batch')
   p_pred_step = jax.pmap(
       functools.partial(
           predict_step,
-          pred_model),
+          pred_encode,
+          pred_decode),
       axis_name='batch',
       static_broadcasted_argnums=(3, 4))  # eos token, max_length are constant
 
@@ -570,8 +588,8 @@ def main(argv):
   for step, batch in zip(range(start_step, FLAGS.num_train_steps), train_iter):
     # Shard data to devices and do a training step.
     batch = common_utils.shard(jax.tree_map(lambda x: x._numpy(), batch))  # pylint: disable=protected-access
-    optimizer, metrics, dropout_rngs = p_train_step(
-        optimizer, batch, dropout_rng=dropout_rngs)
+    optimizer, auxvars, metrics, dropout_rngs = p_train_step(
+        jax_utils.replicate(step), optimizer, batch, dropout_rng=dropout_rngs)
     metrics_all.append(metrics)
 
     # Save a checkpoint on one host after every checkpoint_freq steps.
@@ -579,7 +597,7 @@ def main(argv):
         and step % FLAGS.checkpoint_freq == 0 and step > 0
         and jax.host_id() == 0):
         checkpoints.save_checkpoint(FLAGS.model_dir,
-                                    jax_utils.unreplicate(optimizer),
+                                    (step, jax_utils.unreplicate(variables)),
                                     step)
 
     # Periodic metric handling.
@@ -645,10 +663,9 @@ def main(argv):
       pred_batch = common_utils.shard(pred_batch)
       per_device_batchsize = pred_batch['inputs'].shape[1]
       cache_dtype = jnp.bfloat16 if FLAGS.use_bfloat16 else jnp.float32
-      cache = jax_utils.replicate(
-          cache_def.initialize_cache((per_device_batchsize,
-                                      FLAGS.max_predict_length),
-                                     dtype=cache_dtype))
+      cache = jax.tree_map(
+          lambda fn: fn((per_device_batchsize, FLAGS.max_predict_length), cache_dtype) if callable(fn) else fn, cache_def)
+      cache = jax_utils.replicate(cache)
       predicted = p_pred_step(optimizer.target,
                               pred_batch['inputs'],
                               cache,
