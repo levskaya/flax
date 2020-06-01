@@ -76,6 +76,24 @@ class ScanVariableMode(enum.Enum):
 ScanVariableModes = Sequence[Tuple[KindFilter, Union[ScanVariableMode, str]]]
 
 
+def group_kinds(xs: Variables,
+                kind_filters: Sequence[KindFilter]) -> Sequence[Variables]:
+  """Group variables by kind filters."""
+  kinds = xs.keys()
+  groups = []
+  for kind_filter in kind_filters:
+    remaining_kinds = []
+    group = {}
+    for kind in kinds:
+      if in_kind_filter(kind_filter, kind):
+        group[kind] = jax.tree_map(lambda x: x, xs[kind])
+      else:
+        remaining_kinds.append(kind)
+    kinds = remaining_kinds
+    groups.append(group)
+  return tuple(groups)
+
+
 class Scope:
   """Scope."""
 
@@ -185,24 +203,6 @@ class Scope:
     for kind in kinds:
       self.get_kind(kind)
 
-  def _group_dict(self,
-                  xs: Variables,
-                  kind_filters: Sequence[KindFilter]) -> Sequence[Variables]:
-    """Group variables by kind filters."""
-    kinds = xs.keys()
-    groups = []
-    for kind_filter in kind_filters:
-      remaining_kinds = []
-      group = {}
-      for kind in kinds:
-        if in_kind_filter(kind_filter, kind):
-          group[kind] = jax.tree_map(lambda x: x, xs[kind])
-        else:
-          remaining_kinds.append(kind)
-      kinds = remaining_kinds
-      groups.append(group)
-    return tuple(groups)
-
   @staticmethod
   def pack(fn: Callable[..., Any],
            in_variable_filters: Sequence[KindFilter],
@@ -214,7 +214,7 @@ class Scope:
       # pylint: disable=protected-access
       self._validate_trace_level()
       self._populate_kinds()
-      variable_groups = self._group_dict(self.variables, in_variable_filters)
+      variable_groups = group_kinds(self.variables, in_variable_filters)
       # Make sure in only variable kinds are frozen
       for variable_group in variable_groups:
         for kind, kind_variables in variable_group.items():
@@ -224,7 +224,7 @@ class Scope:
           if not kind_in_out:
             variable_group[kind] = freeze(kind_variables)
 
-      rng_groups = self._group_dict(self.rngs, rng_filters)
+      rng_groups = group_kinds(self.rngs, rng_filters)
       for rng_group in rng_groups:
         for kind in rng_group:
           rng_group[kind] = self.make_rng(kind)
@@ -244,7 +244,7 @@ class Scope:
         mutable_variables = {key: val for key, val
                              in scope.variables.items()
                              if not isinstance(val, FrozenDict)}
-        out_variable_groups = self._group_dict(
+        out_variable_groups = group_kinds(
             mutable_variables, tuple(out_variable_filters) + (True,))
         remainder = tuple(out_variable_groups[-1].keys())
         if remainder:
