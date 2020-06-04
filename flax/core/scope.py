@@ -103,6 +103,7 @@ class Scope:
                name: Optional[str] = None,
                parent: Optional['Scope'] = None):
     self.parent = parent
+    self.children = {}
     self.name = name
     self.variables = variables
     self.rngs = rngs if rngs else {}
@@ -135,6 +136,7 @@ class Scope:
     self.reservations.add(name)
     rngs = {key: _fold_in_str(rng, name) for key, rng in self.rngs.items()}
     scope = Scope({}, name=name, rngs=rngs, parent=self)
+    self.children[name] = scope
     return scope
 
   def child(self,

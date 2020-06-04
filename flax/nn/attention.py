@@ -32,7 +32,7 @@ from jax import lax
 from jax import random
 import jax.numpy as jnp
 from .linear import default_kernel_init
-from .linear import DenseGeneral, dense_general
+from .linear import dense_general
 import numpy as onp
 
 
