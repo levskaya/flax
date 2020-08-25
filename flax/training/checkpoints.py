@@ -25,7 +25,8 @@ import re
 from absl import logging
 
 from flax import serialization
-from tensorflow.io import gfile
+import tensorflow
+gfile = tensorflow.io.gfile
 
 
 # Single-group reg-exps for int or float numerical substrings.

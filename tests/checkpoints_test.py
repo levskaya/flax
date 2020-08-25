@@ -22,7 +22,8 @@ from flax.training import checkpoints
 import jax
 from jax import test_util as jtu
 import numpy as np
-from tensorflow.io import gfile
+import tensorflow
+gfile = tensorflow.io.gfile
 
 # Parse absl flags test_srcdir and test_tmpdir.
 jax.config.parse_flags_with_absl()
